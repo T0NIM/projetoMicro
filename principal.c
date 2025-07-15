@@ -5,8 +5,8 @@
 #include "teclado.h"
 
 void init_PWM(void) {
-    TRISC2 = 0;          // RC2 (CCP1) como saída
-    PR2 = 255;           // Define período PWM (5kHz para Fosc = 8MHz e prescaler 4)
+    TRISC2 = 0;          // RC2 (CCP1) como saï¿½da
+    PR2 = 255;           // Define perï¿½odo PWM (5kHz para Fosc = 8MHz e prescaler 4)
     CCP1CON = 0b00001100; // Modo PWM
     T2CON = 0b00000101;   // Timer2 ligado, prescaler 4
     // Duty cycle inicial (0%)
@@ -30,7 +30,7 @@ float str_to_float(const char *str) {
     return (float)res;
 }
 
-const char digits[10] = { // Tabela que decodifica os segmentos dos displays em digitos compreensíveis
+const char digits[10] = { // Tabela que decodifica os segmentos dos displays em digitos compreensï¿½veis
     0b00111111, // 0
     0b00000110, // 1
     0b01011011, // 2
@@ -43,21 +43,72 @@ const char digits[10] = { // Tabela que decodifica os segmentos dos displays em 
     0b01101111  // 9
 };
 
+// Funes para controle dos displays de 7 segmentos
+void lcd_disable(void) {
+    // Desabilita o LCD
+    LENA = 0;  // Disable Enable
+    LDAT = 0;  // RS = 0
+    PORTD &= 0x0F;  // Zera RD4-RD7 (dados do LCD)
+}
+
+void lcd_enable(void) {
+    // Reabilita o LCD 
+    lcd_init();
+    lcd_cmd(L_NCR);
+}
+
+void display_7seg_init(void) {
+    // Configura pinos para displays 7 segmentos
+    TRISD &= 0x0F;  // RD4-RD7 como sada (segmentos)
+    TRISE &= 0xF9;  // RE1 e RE2 como sada (seleo de display)
+    PORTD &= 0x0F;  // Limpa segmentos
+    PORTEbits.RE1 = 0;  // DISP3 desligado
+    PORTEbits.RE2 = 0;  // DISP4 desligado
+}
+
+void display_number(unsigned char num) {
+    // Mostra um nmero de 0-99 nos displays DISP3 (dezena) e DISP4 (unidade)
+    unsigned char dezena = num / 10;
+    unsigned char unidade = num % 10;
+    
+    // Multiplexer para os displays
+    static unsigned char toggle = 0;
+    
+    if (toggle == 0) {
+        // Mostra dezena no DISP3
+        PORTEbits.RE2 = 0;  // Desliga DISP4
+        PORTD = (PORTD & 0x0F) | (digits[dezena] & 0xF0);  // Segmentos RD4-RD7
+        PORTEbits.RE1 = 1;  // Liga DISP3
+        toggle = 1;
+    } else {
+        // Mostra unidade no DISP4  
+        PORTEbits.RE1 = 0;  // Desliga DISP3
+        PORTD = (PORTD & 0x0F) | (digits[unidade] & 0xF0);  // Segmentos RD4-RD7
+        PORTEbits.RE2 = 1;  // Liga DISP4
+        toggle = 0;
+    }
+}
+
 int main(void) {
     unsigned char modo = 0, modo_flag = 1, heater_flag = 0, cooler_flag = 0, heater_on = 0, fan_on = 0, submodo_auto = 0;
     unsigned char int_pisca = 0, key;
+    // Variveis para controle do display
+    unsigned char display_mode = 0;  // 0=LCD, 1=7seg setpoint, 2=7seg temperatura
+    unsigned char display_counter = 0;  // Contador para multiplexing
+    float last_setpoint = 25.0;  //ltimo setpoint digitado pelo teclado
+    
     unsigned int lm35_read, setpoint_temp_read, int_teclado = 0;
-    char entrada_teclado[5] = ""; // até 3 dígitos + null + margem
+    char entrada_teclado[5] = ""; // at 3 dgitos + null + margem
     unsigned char index = 0;
     float temp, setpoint_temp, histerese = 5.0;
     char temp_str[8], setpoint_temp_str[8];
     TRISC5 = 0;      // Heater
-    TRISA = 0b00000111;    // Entradas analógicas
-    TRISB = 0b00011111; // RB0-RB2 entrada
+    TRISA = 0b00000111;    // Entradas analgicas
+    TRISB = 0b00111111; // RB0-RB5 entrada (incluindo RB5)
     PORTB = 0x00;
     TRISC1 = 0;     // Buzzer
-    TRISE &= 0xF9;  // Pinos RE1 e RE2 como saída
-    TRISD &= 0x0F;  // RD4-RD7 como saída
+    TRISE &= 0xF9;  // Pinos RE1 e RE2 como sada
+    TRISD &= 0x0F;  // RD4-RD7 como sada
     TRISC2 = 0;     // CCP1 PWM Fan
     TRISC1 = 0;
     adc_init();
@@ -72,27 +123,66 @@ int main(void) {
         temp = (float)(lm35_read * 500.0 / 1023.0);
         setpoint_temp = (float)(setpoint_temp_read / 10);
         
-      
-        // Alternar entre modo manual e automático
-        if (RB2 == 0) {
-            lcd_cmd(L_NCR);
+        // Boto RB5 - Alterna entre LCD e displays 7 segmentos
+        if (RB5 == 0) {
             __delay_ms(50);
-            while (RB2 == 0);
-            modo = !modo;
-            modo_flag = !modo_flag;
-            submodo_auto = 0; // Reseta submodo teclado
-            PORTCbits.RC5 = 0;
-            set_duty(0);
-            heater_flag = 0;
-            cooler_flag = 0;
-            PORTBbits.RB6 = 0;
-            PORTBbits.RB7 = 0;
-            lcd_cmd(L_CLR);
+            while (RB5 == 0);  // Espera soltar o boto
+            
+            display_mode++;
+            if (display_mode > 2) {
+                display_mode = 0;  // Volta ao modo LCD
+            }
+            
+            // Configura hardware conforme o modo
+            if (display_mode == 0) {
+                // Modo LCD
+                lcd_enable();
+            } else {
+                // Modo displays 7 segmentos
+                lcd_disable();
+                display_7seg_init();
+            }
+        }
+        
+        // Controle dos displays conforme o modo
+        if (display_mode == 1) {
+            // Mostra setpoint nos displays 7 segmentos
+            display_counter++;
+            if (display_counter >= 50) {  // Controla velocidade do multiplexing
+                display_number((unsigned char)last_setpoint);
+                display_counter = 0;
+            }
+        } else if (display_mode == 2) {
+            // Mostra temperatura atual nos displays 7 segmentos
+            display_counter++;
+            if (display_counter >= 50) {  // Controla velocidade do multiplexing
+                display_number((unsigned char)temp);
+                display_counter = 0;
+            }
+        }
+      
+        // Alternar entre modo manual e automtico
+        if (RB2 == 0) {
+            if (display_mode == 0) {  // S funciona no modo LCD
+                lcd_cmd(L_NCR);
+                __delay_ms(50);
+                while (RB2 == 0);
+                modo = !modo;
+                modo_flag = !modo_flag;
+                submodo_auto = 0; // Reseta submodo teclado
+                PORTCbits.RC5 = 0;
+                set_duty(0);
+                heater_flag = 0;
+                cooler_flag = 0;
+                PORTBbits.RB6 = 0;
+                PORTBbits.RB7 = 0;
+                lcd_cmd(L_CLR);
+            }
         }
         
         
-        // Alternar submodo TECLADO dentro do automático
-        if (modo == 1 && RB1 == 0) {
+        // Alternar submodo TECLADO dentro do automtico
+        if (modo == 1 && RB1 == 0 && display_mode == 0) {  // S funciona no modo LCD
             __delay_ms(50);
             while (RB1 == 0);
             submodo_auto = !submodo_auto;
@@ -128,7 +218,7 @@ int main(void) {
                         }
                         while (read_key() != '\0'); // Espera soltar a tecla
                     }
-                    // Apagar último caractere com '*'
+                    // Apagarltimo caractere com '*'
                     if (key == '*') {
                         if (index > 0) {
                             entrada_teclado[--index] = '\0';
@@ -145,6 +235,8 @@ int main(void) {
                         __delay_ms(50);
                         while (RB3 == 0);
                         int_teclado = 1;
+                        // Armazena oltimo setpoint digitado
+                        last_setpoint = str_to_float(entrada_teclado);
                         lcd_cmd(L_CLR);
                         lcd_cmd(L_NCR);
                         modo = 1;
@@ -154,7 +246,7 @@ int main(void) {
                 }
             }
         }
-        if (modo == 0) {
+        if (modo == 0 && display_mode == 0) {  // S atualiza LCD no modo LCD
             // --- MODO MANUAL ---
             // Heater manual ON/OFF
             if (RB1 == 0) {
@@ -197,12 +289,12 @@ int main(void) {
             print_lcd(cooler_flag ? "Esfriando" : "         ");
         }
         else if (modo == 1 && submodo_auto == 0) {
-            // --- MODO AUTOMÁTICO NORMAL ---
+            // --- MODO AUTOMTICO NORMAL ---
             if(int_teclado == 1){
                 setpoint_temp = str_to_float(entrada_teclado);
             }    
             
-            // Lógica heater/fan
+            // Lgica heater/fan
             if (temp <= setpoint_temp - histerese) heater_on = 1;
             if (temp >= setpoint_temp) heater_on = 0;
             if (temp >= setpoint_temp + histerese) fan_on = 1;
@@ -220,39 +312,70 @@ int main(void) {
             } else {
                 PORTBbits.RB7 = 0;
             }
-            // LCD automático
-            lcd_cmd(L_L1);
-            if(int_teclado == 1){
-                print_lcd("  Modo Teclado");
-            }
-            else{
-                print_lcd("  Modo Trimpot");
-            }
-            lcd_cmd(L_L2);
-            print_lcd("Atual: ");
-            float_str(temp, temp_str);
-            print_lcd(temp_str);
-            lcd_dat(0xDF);
-            print_lcd("C");
-            lcd_cmd(L_L3);
-            print_lcd("Alvo: ");
-            float_str(setpoint_temp, setpoint_temp_str);
-            print_lcd(setpoint_temp_str);
-            lcd_dat(0xDF);
-            print_lcd("C");
-            lcd_cmd(L_L4);
-            if (heater_on == 1){
-                print_lcd("Esquentando");
-            }
-            else if (fan_on == 1){
-                print_lcd("Esfriando  ");
-            }
-            else if (heater_on == 0 && fan_on == 0){
-                print_lcd("Estavel      ");
+            // LCD automtico (s atualiza no modo LCD)
+            if (display_mode == 0) {
+                lcd_cmd(L_L1);
+                if(int_teclado == 1){
+                    print_lcd("  Modo Teclado");
+                }
+                else{
+                    print_lcd("  Modo Trimpot");
+                }
+                lcd_cmd(L_L2);
+                print_lcd("Atual: ");
+                float_str(temp, temp_str);
+                print_lcd(temp_str);
+                lcd_dat(0xDF);
+                print_lcd("C");
+                lcd_cmd(L_L3);
+                print_lcd("Alvo: ");
+                float_str(setpoint_temp, setpoint_temp_str);
+                print_lcd(setpoint_temp_str);
+                lcd_dat(0xDF);
+                print_lcd("C");
+                lcd_cmd(L_L4);
+                if (heater_on == 1){
+                    print_lcd("Esquentando");
+                }
+                else if (fan_on == 1){
+                    print_lcd("Esfriando  ");
+                }
+                else if (heater_on == 0 && fan_on == 0){
+                    print_lcd("Estavel      ");
+                }
             }
                          
             if(RB0 == 0){
                 int_teclado = 0;
+            }
+        }
+        
+        // Controle independente do heater/cooler mesmo no modo display
+        if (modo == 0 && display_mode != 0) {
+            // Controles manuais funcionam mesmo no modo display
+            if (RB1 == 0) {
+                __delay_ms(50);
+                while (RB1 == 0);
+                heater_flag = !heater_flag;
+                PORTCbits.RC5 = heater_flag;
+                PORTBbits.RB6 = heater_flag;
+            }
+            if (RB0 == 0) {
+                __delay_ms(50);
+                while (RB0 == 0);
+                cooler_flag = !cooler_flag;
+                set_duty(cooler_flag ? 1024 : 0);
+                if (!cooler_flag) PORTBbits.RB7 = 0;
+            }
+            // Piscar LED RB7 se Fan ON
+            if (cooler_flag) {
+                int_pisca++;
+                if (int_pisca >= 4) {
+                    PORTBbits.RB7 = !PORTBbits.RB7;
+                    int_pisca = 0;
+                }
+            } else {
+                PORTBbits.RB7 = 0;
             }
         }
     }
